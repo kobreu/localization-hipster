@@ -10,6 +10,8 @@ import codecs
 import gspread
 import argparse
 import getpass
+import csv
+import xml.etree.ElementTree as ET
 from pprint import pprint
 
 langcolumnoffset = 1
@@ -18,6 +20,7 @@ keysrowoffset = 1
 sys.dont_write_bytecode = True
 
 HOOK_EXPORT_ALTER_TERMS = 'export_alter_terms'
+HOOK_IMPORT = 'import_terms'
 CONFIG_FILE = os.path.expanduser('~/.l10n-hipster-config')
 
 def diff(a, b):
@@ -108,7 +111,11 @@ def import_terms(sheet, lang, terms):
 	flattenedterms = flatten(terms, [])
 	sheet.resize(keysrowoffset+len(flattenedterms), langcolumnoffset+len(langs))
 	# find the row
-	langcell = sheet.find(lang)
+	try:
+		langcell = sheet.find(lang)
+	except CellNotFound as cnf:
+		# TODO: handle cell not found
+		print "Column for language" + lang + " not found, please create!"
 	keyrange = sheetrange(sheet, keysrowoffset+1, 1, keysrowoffset+len(flattenedterms), 1)
 	keyrange2 = sheetrange(sheet, keysrowoffset+1, langcell.col, keysrowoffset+len(flattenedterms),langcell.col)
 	for i in range(0, len(keyrange)):
@@ -128,17 +135,17 @@ def get_json(file):
 adddict = { 'en-us' : 'en_US', 'de' : 'de_DE', 'es': 'es_ES', 'fr' : 'fr_FR', 'it' : 'it_IT'}
 
 def load_project(config):
-	config = open('.l10n', 'r')
-	data = json.load(config)
+	project_config = open('.l10n', 'r')
+	data = json.load(project_config)
 	gc = gspread.login(config['user'], config['password'])
 	wks = gc.open_by_key(data['Key']).sheet1
 	return wks
 
-def _import_custom(sheet, custom_file, args):
-	sys.path.append(os.path.abspath('.'))
-	import custom_import
-	terms = custom_import.import_custom(args.file)
-	import_terms(sheet, args.l, terms)
+def _import_custom(sheet, hooks, args):
+	print hooks
+	#terms = hooks_funcs.export_alter_terms(args.exporter, terms)
+	#terms = custom_import.import_custom(args.file)
+	#import_terms(sheet, args.l, terms)
 	
 def get_ios_strings(file):
 	file=codecs.open (file , 'r', 'utf-8')
@@ -151,26 +158,83 @@ def get_ios_strings(file):
 			terms[linesplitted[1]] = linesplitted[3]
 	return terms
 	
+def get_android_strings(file):
+	xmltree = ET.parse(file)
+	root = xmltree.getroot()
+	terms = tree()
+	for child in root:
+		terms[child.get('name')] = child.text
+	return terms
+	
+def utf_8_encoder(unicode_csv_data):
+    for line in unicode_csv_data:
+        yield line.encode('utf-8')
+	
+def unicode_csv_reader(unicode_csv_data, dialect=csv.excel, **kwargs):
+    # csv.py doesn't do Unicode; encode temporarily as UTF-8:
+    csv_reader = csv.reader(utf_8_encoder(unicode_csv_data),
+                            dialect=dialect, **kwargs)
+    for row in csv_reader:
+        # decode UTF-8 back to Unicode, cell by cell:
+        yield [unicode(cell, 'utf-8') for cell in row]	
+	
+# all languages are in one file, so the returned terms are different from json, ios,...
+def get_csv_strings(file):
+	langs = []
+	terms = tree()
+	with codecs.open(file,'r', 'utf-8') as file:
+		reader=unicode_csv_reader(file, delimiter=';', strict=True) # todo: make delimiter choosable
+		for i, row in enumerate(reader):
+			if i == 0:
+				# first line contains the languages
+				for j in range(1, len(row)-1):
+					langs.append(row[j])
+			else:
+				for j in range(1, len(row)-1):
+					terms[langs[j-1]][row[0]] = row[j]
+	return terms
+	
+	
+	
 # TODO: custom import
 def get_local_terms(file):
 	if(".strings" in args.file):
 		terms = get_ios_strings(args.file)
+	if(".csv" in args.file):
+		terms = get_csv_strings(args.file)
+	if("strings.xml" in args.file):
+		terms = get_android_strings(args.file)
 	else:
 		terms = get_json(args.file)
 	return terms
 
 def importt(args):
 	wks = load_project(args.config)
-	if os.path.isfile('custom_import.py'):
-		_import_custom(wks, 'import.py', args)
-	else :
-		terms = get_local_terms(args.file)
-		import_terms(wks, args.l, terms)
+	(hooks, hooks_funcs) = load_hooks()
+	if(hasattr(hooks_funcs, HOOK_IMPORT)):	
+		_import_custom(wks, (hooks, hooks_funcs), args)
+	else:
+		if(".strings" in args.file):
+			terms = get_ios_strings(args.file)
+			import_terms(wks, args.l, terms)
+		if(".csv" in args.file):
+			# Todo: message that args.l is ignored if it is set here
+			terms = get_csv_strings(args.file)
+			for lang in terms:
+				import_terms(wks, lang, terms[lang])
+		else:
+			terms = get_json(args.file)
+			import_terms(wks, args.l, terms)	
 	
 def init(args):
 	gc = gspread.login(args.config['user'], args.config['password'])
 	wks = gc.open_by_key(args.key).sheet1
-	wks.resize(1,2)
+	print wks
+	try:
+		wks.resize(1,2)
+	except Exception as ex:
+		print ex.read()
+		raise ex
 	#TODO ask: this will clear sheet 1 of...
 	cell1 = sheetrange(wks, 1,1,1,2)
 	cell1[0].value = 'Key'
@@ -206,6 +270,8 @@ def load_hooks():
 		import hooks as hooks_funcs
 		if hasattr(hooks_funcs, HOOK_EXPORT_ALTER_TERMS):
 			has_hooks.append(HOOK_EXPORT_ALTER_TERMS)
+		if hasattr(hooks_funcs, HOOK_IMPORT):
+			has_hooks.append(HOOK_IMPORT)
 		return (has_hooks, hooks_funcs)
 	else:
 		return ([], {})
@@ -248,6 +314,10 @@ def export(args):
 					langfile.write("<string name=\""+key+"\">\""+value+"\"</string>\n")
 			langfile.write("</resources>")
 			langfile.close()
+	elif args.export == 'csv':
+		with codecs.open("terms.csv", 'w', 'utf-8') as file:
+			print "not yet implemented"
+			
 
 def compare(args):
 	wks = load_project(args.config)
