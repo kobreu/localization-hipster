@@ -12,6 +12,7 @@ import argparse
 import getpass
 import csv
 import xml.etree.ElementTree as ET
+import cStringIO
 from pprint import pprint
 
 langcolumnoffset = 1
@@ -21,6 +22,7 @@ sys.dont_write_bytecode = True
 
 HOOK_EXPORT_ALTER_TERMS = 'export_alter_terms'
 HOOK_IMPORT = 'import_terms'
+HOOK_EXPORT_TERMS = 'export_terms'
 CONFIG_FILE = os.path.expanduser('~/.l10n-hipster-config')
 
 def diff(a, b):
@@ -225,11 +227,10 @@ def importt(args):
 		else:
 			terms = get_json(args.file)
 			import_terms(wks, args.l, terms)	
-	
+			
+			
 def init(args):
-	gc = gspread.login(args.config['user'], args.config['password'])
-	wks = gc.open_by_key(args.key).sheet1
-	print wks
+	wks = load_project(args.config)
 	try:
 		wks.resize(1,2)
 	except Exception as ex:
@@ -241,16 +242,14 @@ def init(args):
 	cell1[1].value = 'en_US'
 	wks.update_cells(cell1)
 	#cell1 = wks.cell(1,1)
+	print "Initialized empty translation project at " + wks.title + "";
+		
+def link(args):
 	config = open('.l10n', 'w+')
 	json.dump({'Key' : args.key},config)
 	config.close()
-	print "Initialized empty Localization Project (" + args.key + ")";
-	
-def _export_custom(terms, args):
-	sys.path.append(os.path.abspath('.'))
-	import custom_export
-	custom_export.export_custom(terms)
-
+	print "Linked with spreadsheet at " + args.key +".";
+		
 def replace_placeholders(term):
 	res = term
 	c = 0
@@ -272,28 +271,111 @@ def load_hooks():
 			has_hooks.append(HOOK_EXPORT_ALTER_TERMS)
 		if hasattr(hooks_funcs, HOOK_IMPORT):
 			has_hooks.append(HOOK_IMPORT)
+		if hasattr(hooks_funcs, HOOK_EXPORT_TERMS):
+			has_hooks.append(HOOK_EXPORT_TERMS)
 		return (has_hooks, hooks_funcs)
 	else:
 		return ([], {})
+		
+
+	
+def lint(sheet):
+	range = sheet.col_values(1)
+	error = False
+	for index, key in enumerate(range):
+		if not key:
+			print "Error: Empty key at row " + str(index) + ". Give this row a key by editing the column A, row " + str(index) + " in the spreadsheet."
+			error = True
+	
+	terms = get_terms(sheet)
+	missingTranslationError = False
+	for lang in terms:
+		flattenedterms = flatten(terms[lang], [])
+		for term in flattenedterms:
+			for key in term.iterkeys():
+				if not term[key]:
+					print "Error: Empty translation for key " + key + " and language " + lang + "."
+					missingTranslationError = True
+					
+	if missingTranslationError:
+		print "There are missing translations. Use --force to export empty translations or specify a fallback language with --fallback."
+		return ['missingTranslationError']
+	elif error:
+		return ['error']
+	else:
+		return []
+	
+def merge_empty(fallback, potentiallyempty):
+	for key in potentiallyempty:
+		if isinstance(potentiallyempty[key], dict):
+			merge_empty(fallback[key], potentiallyempty[key])
+		elif not potentiallyempty[key]:
+			potentiallyempty[key] = fallback[key]
 			
+def escapeproperties(term):
+	ret = term.replace("\n", "\\n")
+	ret = ret.replace("=", "\\=")
+	ret = ret.replace(":", "\\:")
+	return ret
+	
+class UnicodeWriter:
+    """
+    A CSV writer which will write rows to CSV file "f",
+    which is encoded in the given encoding.
+    """
+
+    def __init__(self, f, dialect=csv.excel, encoding="utf-8", **kwds):
+        # Redirect output to a queue
+        self.queue = cStringIO.StringIO()
+        self.writer = csv.writer(self.queue, dialect=dialect, **kwds)
+        self.stream = f
+        self.encoder = codecs.getincrementalencoder(encoding)()
+
+    def writerow(self, row):
+        self.writer.writerow([s.encode("utf-8") for s in row])
+        # Fetch UTF-8 output from the queue ...
+        data = self.queue.getvalue()
+        data = data.decode("utf-8")
+        # ... and reencode it into the target encoding
+        data = self.encoder.encode(data)
+        # write to the target stream
+        self.stream.write(data)
+        # empty queue
+        self.queue.truncate(0)
+
+    def writerows(self, rows):
+        for row in rows:
+            self.writerow(row)
+	
+
+	
 def export(args):
 	wks = load_project(args.config)
+	lint_result = lint(wks)
 	terms = get_terms(wks)
+	if 'error' in lint_result:
+		sys.exit(1)
+	elif 'missingTranslationError' in lint_result:
+		if not args.fallback:
+			sys.exit(1)
+		else: # TODO: don't print errors if fallback language was chosen
+			print "Using fallback language: " + args.fallback
+			#TODO: what if fallback language has missing translations?
+			for lang in terms.keys():
+				merge_empty(terms[args.fallback],terms[lang])
 	(hooks, hooks_funcs) = load_hooks()
 	if has_hook(hooks, HOOK_EXPORT_ALTER_TERMS):
 		# todo make this changeable
 		terms = hooks_funcs.export_alter_terms(args.exporter, terms)
-	if os.path.isfile('custom_export.py'):
-		_export_custom(terms, args)
+	if has_hook(hooks, HOOK_EXPORT_TERMS):
+		hooks_funcs.export_terms(terms)
 	elif args.exporter == 'json':
 		for lang in terms:
 			langfile = codecs.open(lang + '.json', 'w+', 'utf-8')
 			json.dump(terms[lang], langfile, indent=4, ensure_ascii=False)
 	elif args.exporter == 'ios':
 		for lang in terms:
-			foldername = lang.split("_")[0] + ".lproj"
-			os.makedirs(foldername)
-			langfile = codecs.open(foldername + "/Localizable.strings", 'w', 'utf-8')
+			langfile = codecs.open("Localizable-" + lang + ".strings", 'w', 'utf-8')
 			flattenedterms = flatten(terms[lang], [])
 			for term in flattenedterms:
 				for key in term:
@@ -302,9 +384,7 @@ def export(args):
 	elif args.exporter == 'android':
 		for lang in terms:
 			# TODO: adapt placeholders
-			foldername = 'values' if lang.split("_")[0] == 'en' else 'values-' + lang.split("_")[0];
-			os.makedirs(foldername)
-			langfile = codecs.open(foldername + "/strings.xml", 'w', 'utf-8')
+			langfile = codecs.open("strings-"+lang+".xml", 'w', 'utf-8')
 			langfile.write("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
 			langfile.write("<resources>\n")
 			flattenedterms = flatten(terms[lang], [])
@@ -314,9 +394,23 @@ def export(args):
 					langfile.write("<string name=\""+key+"\">\""+value+"\"</string>\n")
 			langfile.write("</resources>")
 			langfile.close()
-	elif args.export == 'csv':
-		with codecs.open("terms.csv", 'w', 'utf-8') as file:
-			print "not yet implemented"
+	elif args.exporter == 'properties':
+		for lang in terms:
+			langfile = codecs.open(lang+".properties", 'w', 'utf-8')
+			flattenedterms = flatten(terms[lang], [])
+			for term in flattenedterms:
+				for key in term:
+					langfile.write(key + " = " + escapeproperties(term[key]) + "\n")
+			langfile.close()
+	elif args.exporter == 'csv':
+		with open("terms.csv", 'w') as file:
+			writer = UnicodeWriter(file, delimiter=',')
+			writer.writerow(['Key'] + terms.keys())
+			flattenedterms = {lang : flatten(terms[lang], []) for lang in terms.keys()}
+			for idx, term in enumerate(flattenedterms[terms.keys()[0]]):
+				key = term.keys()[0]
+				row = [flattenedterms[lang][idx][key] for lang in terms.keys()]
+				writer.writerow([key] + row)
 			
 
 def compare(args):
@@ -349,8 +443,11 @@ def config(args):
 parser = argparse.ArgumentParser(description='i18n command line')
 subparsers = parser.add_subparsers(help='TODO #1')
 
+parser_link = subparsers.add_parser('link', help='link to a spreadsheet')
+parser_link.add_argument('key', help='the google spreadsheet key')
+parser_link.set_defaults(func=link)
 parser_init = subparsers.add_parser('init', help='init a project')
-parser_init.add_argument('key', help='the google spreadsheet key')
+#parser_init.add_argument('key', help='the google spreadsheet key')
 parser_init.set_defaults(func=init)
 parser_flush = subparsers.add_parser('flush', help='flush the translations')
 parser_import = subparsers.add_parser('import', help='import')
@@ -359,6 +456,7 @@ parser_import.add_argument('-l', default='en_US', type=str)
 parser_import.set_defaults(func=importt)
 parser_export = subparsers.add_parser('export', help='export')
 parser_export.add_argument('--exporter', default='json', type=str)
+parser_export.add_argument('--fallback', type=str)
 parser_export.set_defaults(func=export)
 parser_compare = subparsers.add_parser('compare', help='compare')
 parser_compare.add_argument('file', help='file', type=str)
