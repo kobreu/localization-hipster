@@ -13,6 +13,7 @@ import getpass
 import csv
 import xml.etree.ElementTree as ET
 import cStringIO
+import xlsxwriter
 from pprint import pprint
 
 langcolumnoffset = 1
@@ -24,6 +25,38 @@ HOOK_EXPORT_ALTER_TERMS = 'export_alter_terms'
 HOOK_IMPORT = 'import_terms'
 HOOK_EXPORT_TERMS = 'export_terms'
 CONFIG_FILE = os.path.expanduser('~/.l10n-hipster-config')
+
+def query_yes_no(question, default="yes"):
+    """Ask a yes/no question via raw_input() and return their answer.
+
+    "question" is a string that is presented to the user.
+    "default" is the presumed answer if the user just hits <Enter>.
+        It must be "yes" (the default), "no" or None (meaning
+        an answer is required of the user).
+
+    The "answer" return value is one of "yes" or "no".
+    """
+    valid = {"yes": True, "y": True, "ye": True,
+             "no": False, "n": False}
+    if default is None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while True:
+        sys.stdout.write(question + prompt)
+        choice = raw_input().lower()
+        if default is not None and choice == '':
+            return valid[default]
+        elif choice in valid:
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' "
+                             "(or 'y' or 'n').\n")
 
 def diff(a, b):
         b = set(b)
@@ -57,7 +90,16 @@ def get_terms(sheet):
 			langoffset = langoffset + 1
 		offset = offset + 1
 	return termsdict
-	
+
+def get_notes(sheet):
+	keys = get_keys(sheet)
+	langs = get_languages(sheet)
+	values = sheet.col_values(len(langs)+langcolumnoffset+1)[keysrowoffset:]
+	# bring value to the same length as keys to have "None" for the rest
+	values = values + [None]*(len(keys)-len(values))
+	notes = dict(zip(keys, values))
+	return notes
+		
 def sync_keys(sheet, new_keys):
 	keys = get_keys(sheet)
 	new = diff(new_keys, keys)
@@ -136,12 +178,15 @@ def get_json(file):
 
 adddict = { 'en-us' : 'en_US', 'de' : 'de_DE', 'es': 'es_ES', 'fr' : 'fr_FR', 'it' : 'it_IT'}
 
+def load_project_with_key(key, user, password):
+	gc = gspread.login(user, password)
+	wks = gc.open_by_key(key).sheet1
+	return wks
+
 def load_project(config):
 	project_config = open('.l10n', 'r')
 	data = json.load(project_config)
-	gc = gspread.login(config['user'], config['password'])
-	wks = gc.open_by_key(data['Key']).sheet1
-	return wks
+	return load_project_with_key(data['Key'], config['user'], config['password'])
 
 def _import_custom(sheet, hooks, args):
 	print hooks
@@ -181,11 +226,11 @@ def unicode_csv_reader(unicode_csv_data, dialect=csv.excel, **kwargs):
         yield [unicode(cell, 'utf-8') for cell in row]	
 	
 # all languages are in one file, so the returned terms are different from json, ios,...
-def get_csv_strings(file):
+def get_csv_strings(file, delimiter=';'):
 	langs = []
 	terms = tree()
 	with codecs.open(file,'r', 'utf-8') as file:
-		reader=unicode_csv_reader(file, delimiter=';', strict=True) # todo: make delimiter choosable
+		reader=unicode_csv_reader(file, delimiter=delimiter, strict=True) # todo: make delimiter choosable
 		for i, row in enumerate(reader):
 			if i == 0:
 				# first line contains the languages
@@ -209,6 +254,10 @@ def get_local_terms(file):
 	else:
 		terms = get_json(args.file)
 	return terms
+	
+def get_property_terms(file):
+	return dict(line.strip().split('=') for line in codecs.open(file, 'r', 'utf-8') if line.strip() != "")
+	
 
 def importt(args):
 	wks = load_project(args.config)
@@ -224,6 +273,9 @@ def importt(args):
 			terms = get_csv_strings(args.file)
 			for lang in terms:
 				import_terms(wks, lang, terms[lang])
+		if(".properties" in args.file):
+			terms = get_property_terms(args.file)
+			import_terms(wks, args.l, terms)
 		else:
 			terms = get_json(args.file)
 			import_terms(wks, args.l, terms)	
@@ -332,12 +384,15 @@ class UnicodeWriter:
         self.encoder = codecs.getincrementalencoder(encoding)()
 
     def writerow(self, row):
+    	print row
+    	print [s.encode("utf-8") for s in row]
         self.writer.writerow([s.encode("utf-8") for s in row])
         # Fetch UTF-8 output from the queue ...
         data = self.queue.getvalue()
         data = data.decode("utf-8")
         # ... and reencode it into the target encoding
         data = self.encoder.encode(data)
+        print data
         # write to the target stream
         self.stream.write(data)
         # empty queue
@@ -348,7 +403,29 @@ class UnicodeWriter:
             self.writerow(row)
 	
 
-	
+def export_to_csv(terms):
+	with open("terms.csv", 'w') as file:
+		writer = UnicodeWriter(file, delimiter=',')
+		writer.writerow(['Key'] + terms.keys())
+		for idx, term in enumerate(terms[terms.keys()[0]]):
+			key = term.keys()[0]
+			row = [unicode(terms[lang][idx][key]) for lang in terms.keys()]
+			writer.writerow([key] + row)
+		
+
+def split(x):
+	if (isinstance(x,unicode) or isinstance(x, str)):
+		return x.split("\n")
+	else:
+		return x
+		
+def foreach(tree, fn):
+	for key in tree:
+		if isinstance(tree[key],dict):
+			foreach(tree[key],fn)
+		else:
+			tree[key] = fn(tree[key])
+		
 def export(args):
 	wks = load_project(args.config)
 	lint_result = lint(wks)
@@ -371,7 +448,9 @@ def export(args):
 		hooks_funcs.export_terms(terms)
 	elif args.exporter == 'json':
 		for lang in terms:
-			langfile = codecs.open(lang + '.json', 'w+', 'utf-8')
+			langfile = codecs.open(args.prefix + lang + '.json', 'w+', 'utf-8')
+			if(args.split):
+				foreach(terms[lang][args.split_prefix], split) 	
 			json.dump(terms[lang], langfile, indent=4, ensure_ascii=False)
 	elif args.exporter == 'ios':
 		for lang in terms:
@@ -403,20 +482,136 @@ def export(args):
 					langfile.write(key + " = " + escapeproperties(term[key]) + "\n")
 			langfile.close()
 	elif args.exporter == 'csv':
-		with open("terms.csv", 'w') as file:
-			writer = UnicodeWriter(file, delimiter=',')
-			writer.writerow(['Key'] + terms.keys())
-			flattenedterms = {lang : flatten(terms[lang], []) for lang in terms.keys()}
-			for idx, term in enumerate(flattenedterms[terms.keys()[0]]):
-				key = term.keys()[0]
-				row = [flattenedterms[lang][idx][key] for lang in terms.keys()]
-				writer.writerow([key] + row)
+		flattenedterms = {lang : flatten(terms[lang], []) for lang in terms.keys()}
+		export_to_csv(flattenedterms)
+
 			
 
 def compare(args):
 	wks = load_project(args.config)
 	local_terms = map(lambda x: x.keys()[0], flatten(get_local_terms(args.file), []))
 	sync_keys(wks, local_terms)
+	
+def combined_import_compare(args):
+	terms = get_csv_strings(args.file, ",")
+	# separate by file
+	allterms = tree()
+	for lang in terms:
+		for k,v in terms[lang].items():
+			split = k.split("/")
+			allterms[split[0]][lang]['/'.join(split[1:])]=v
+	for sheetid,sheetterms in allterms.items():
+		wks = load_project_with_key(sheetid, args.config['user'], args.config['password'])
+		onlineterms = get_terms(wks)
+		onlinetermsflattened = {lang : flatten(onlineterms[lang], []) for lang in onlineterms.keys()}
+		onlinetermsflattenedtransformed = tree()
+		for lang in onlinetermsflattened.keys():
+			transformed = tree()
+			for termdict in onlinetermsflattened[lang]:
+				for k,v in termdict.items():
+					transformed[k] = v
+			onlinetermsflattenedtransformed[lang] = transformed
+		for lang, langterms in sheetterms.items():
+			if lang == "":
+				continue
+			# for now, compare only
+			for key, value in langterms.items():
+				#print value != onlinetermsflattenedtransformed[lang][key]
+				#print value + " " + onlinetermsflattenedtransformed[lang][key]
+				if value != onlinetermsflattenedtransformed[lang][key]:
+					print "diff!!! at " + lang + " " + key
+					
+			#import_terms(wks, lang, langterms)
+
+
+def import_term(sheet, language, key, value):
+	# find the row
+	langcell = sheet.find(language)
+	keyrow = sheet.find(key)
+	
+	keyrange = sheetrange(sheet, keyrow.row, langcell.col, keyrow.row, langcell.col)
+	keyrange[0].value=value
+	sheet.update_cells(keyrange)
+
+def combined_import(args):
+	terms = get_csv_strings(args.file, ",")
+	# separate by file
+	allterms = tree()
+	for lang in terms:
+		for k,v in terms[lang].items():
+			split = k.split("/")
+			allterms[split[0]][lang]['/'.join(split[1:])]=v
+	for sheetid,sheetterms in allterms.items():
+		wks = load_project_with_key(sheetid, args.config['user'], args.config['password'])
+		onlineterms = get_terms(wks)
+		onlinetermsflattened = {lang : flatten(onlineterms[lang], []) for lang in onlineterms.keys()}
+		onlinetermsflattenedtransformed = tree()
+		for lang in onlinetermsflattened.keys():
+			transformed = tree()
+			for termdict in onlinetermsflattened[lang]:
+				for k,v in termdict.items():
+					transformed[k] = v
+			onlinetermsflattenedtransformed[lang] = transformed
+		for lang, langterms in sheetterms.items():
+			if lang == "" or lang == "Notes" or lang == "Kommentare":
+				continue
+			# for now, compare only
+			for key, value in langterms.items():
+				#print value != onlinetermsflattenedtransformed[lang][key]
+				#print value + " " + onlinetermsflattenedtransformed[lang][key]
+				if value != onlinetermsflattenedtransformed[lang][key]:
+					if not onlinetermsflattenedtransformed[lang][key]:
+						print "Inserting text \n" + value.encode('ascii', 'backslashreplace') + "\nfor "  + key + " and language " + lang + ""
+						import_term(wks, lang, key, value)
+
+					else:
+						answer = query_yes_no("Should I replace text \n" + onlinetermsflattenedtransformed[lang][key].encode('ascii', 'backslashreplace') + "\n with \n" + value.encode('ascii', 'backslashreplace') + "\nkey "+ key + " for language " + lang + "?", "no")
+						if answer:
+							import_term(wks, lang, key, value)
+			#import_terms(wks, lang, langterms)			
+	
+def combined_export(args):
+	projects = args.files.split(",")
+	allterms = defaultdict(list)
+	allnotes = {}
+	print projects
+	for project in projects:
+		print project
+		wks = load_project_with_key(project, args.config['user'], args.config['password'])
+		terms = get_terms(wks)
+		flattenedterms = {lang : flatten(terms[lang], [project]) for lang in terms.keys()}
+		for lang in flattenedterms:
+			allterms[lang]  = allterms[lang] + flattenedterms[lang]
+		notes = get_notes(wks)
+		notes = allnotes.update({ project + "/" + k: v for k, v in notes.items() })
+	print allterms
+	workbook = xlsxwriter.Workbook('terms.xlsx')
+	worksheet = workbook.add_worksheet()
+	format = workbook.add_format()
+	format.set_text_wrap()
+	headformat = workbook.add_format()
+	headformat.set_font_size(20)
+	worksheet.write(0,0, "Key", headformat)
+	i = 1
+	for key in allterms.keys():
+		worksheet.write(0,i, key, headformat)
+		i = i+1
+	worksheet.write(0,i, "Notes", headformat)
+	i = 1
+	for idx, term in enumerate(allterms[allterms.keys()[0]]):
+		j = 1
+		key = term.keys()[0]
+		worksheet.write(i,0,key)
+		for lang in terms.keys():
+			worksheet.write(i,j, allterms[lang][idx][key], format)
+			j = j+1
+		worksheet.write(i,j, allnotes[key], format)
+		i = i + 1
+	formatCond = workbook.add_format()
+	formatCond.set_bg_color('yellow')
+	worksheet.freeze_panes(1,0)
+	worksheet.conditional_format(1,1,len(allterms[allterms.keys()[0]]), len(allterms), { 'type' : 'blanks', 'format': formatCond })
+	workbook.close()
 	
 def load_global_config():
 	if(not os.path.isfile(CONFIG_FILE)):
@@ -438,6 +633,8 @@ def config(args):
 				config = {}
 			config['user'] = args.user
 			json.dump(config, file)
+			
+
 		
 	
 parser = argparse.ArgumentParser(description='i18n command line')
@@ -445,6 +642,8 @@ subparsers = parser.add_subparsers(help='TODO #1')
 
 parser_link = subparsers.add_parser('link', help='link to a spreadsheet')
 parser_link.add_argument('key', help='the google spreadsheet key')
+# TODO:
+# parser_link.add_argument('sheet', help='the sheet of the project')
 parser_link.set_defaults(func=link)
 parser_init = subparsers.add_parser('init', help='init a project')
 #parser_init.add_argument('key', help='the google spreadsheet key')
@@ -457,6 +656,9 @@ parser_import.set_defaults(func=importt)
 parser_export = subparsers.add_parser('export', help='export')
 parser_export.add_argument('--exporter', default='json', type=str)
 parser_export.add_argument('--fallback', type=str)
+parser_export.add_argument('--prefix', type=str)
+parser_export.add_argument('--split', nargs='?', const=True, default=False)
+parser_export.add_argument('--split_prefix', type=str)
 parser_export.set_defaults(func=export)
 parser_compare = subparsers.add_parser('compare', help='compare')
 parser_compare.add_argument('file', help='file', type=str)
@@ -464,6 +666,15 @@ parser_compare.set_defaults(func=compare)
 parser_compare = subparsers.add_parser('config', help='config')
 parser_compare.add_argument('--user', type=str)
 parser_compare.set_defaults(func=config)
+parser_combined_export = subparsers.add_parser('combined-export', help='combined export')
+parser_combined_export.add_argument('files', type=str)
+parser_combined_export.set_defaults(func=combined_export)
+parser_combined_import = subparsers.add_parser('combined-import-compare', help='combined import compare')
+parser_combined_import.add_argument('file', type=str)
+parser_combined_import.set_defaults(func=combined_import_compare)
+parser_combined_import = subparsers.add_parser('combined-import', help='combined import')
+parser_combined_import.add_argument('file', type=str)
+parser_combined_import.set_defaults(func=combined_import)
 
 
 args = parser.parse_args()
