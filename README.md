@@ -7,6 +7,8 @@
 
 ## Get Started
 
+pip install gspread
+pip install xlsxwriter
 
 ## Import keys
 
