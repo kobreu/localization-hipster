@@ -15,6 +15,50 @@ import xml.etree.ElementTree as ET
 import cStringIO
 import xlsxwriter
 from pprint import pprint
+from collections import OrderedDict, Callable
+
+class DefaultOrderedDict(OrderedDict):
+    # Source: http://stackoverflow.com/a/6190500/562769
+    def __init__(self, default_factory=None, *a, **kw):
+        if (default_factory is not None and
+           not isinstance(default_factory, Callable)):
+            raise TypeError('first argument must be callable')
+        OrderedDict.__init__(self, *a, **kw)
+        self.default_factory = default_factory
+
+    def __getitem__(self, key):
+        try:
+            return OrderedDict.__getitem__(self, key)
+        except KeyError:
+            return self.__missing__(key)
+
+    def __missing__(self, key):
+        if self.default_factory is None:
+            raise KeyError(key)
+        self[key] = value = self.default_factory()
+        return value
+
+    def __reduce__(self):
+        if self.default_factory is None:
+            args = tuple()
+        else:
+            args = self.default_factory,
+        return type(self), args, None, None, self.items()
+
+    def copy(self):
+        return self.__copy__()
+
+    def __copy__(self):
+        return type(self)(self.default_factory, self)
+
+    def __deepcopy__(self, memo):
+        import copy
+        return type(self)(self.default_factory,
+                          copy.deepcopy(self.items()))
+
+    def __repr__(self):
+        return 'OrderedDefaultDict(%s, %s)' % (self.default_factory,
+                                               OrderedDict.__repr__(self))
 
 langcolumnoffset = 1
 keysrowoffset = 1
@@ -63,7 +107,7 @@ def diff(a, b):
         return [aa for aa in a if aa not in b]
 
 def tree():
-    return defaultdict(tree)
+    return DefaultOrderedDict(tree)
 
 def get_languages(sheet):
 	langs_list = sheet.row_values(1)
@@ -183,10 +227,17 @@ def load_project_with_key(key, user, password):
 	wks = gc.open_by_key(key).sheet1
 	return wks
 
-def load_project(config):
-	project_config = open('.l10n', 'r')
-	data = json.load(project_config)
-	return load_project_with_key(data['Key'], config['user'], config['password'])
+def load_project(args):
+	if os.path.isfile('.l10n'):
+		project_config = open('.l10n', 'r')
+		data = json.load(project_config)
+		key = data['Key']
+	elif args.key:
+		key = args.key
+	else :
+		print "Neither .l10n is present, nor key is configured. Exiting"
+		sys.exit(1)
+	return load_project_with_key(key, args.config['user'], args.config['password'])
 
 def _import_custom(sheet, hooks, args):
 	print hooks
@@ -260,7 +311,7 @@ def get_property_terms(file):
 	
 
 def importt(args):
-	wks = load_project(args.config)
+	wks = load_project(args)
 	(hooks, hooks_funcs) = load_hooks()
 	if(hasattr(hooks_funcs, HOOK_IMPORT)):	
 		_import_custom(wks, (hooks, hooks_funcs), args)
@@ -282,7 +333,7 @@ def importt(args):
 			
 			
 def init(args):
-	wks = load_project(args.config)
+	wks = load_project(args)
 	try:
 		wks.resize(1,2)
 	except Exception as ex:
@@ -427,7 +478,7 @@ def foreach(tree, fn):
 			tree[key] = fn(tree[key])
 		
 def export(args):
-	wks = load_project(args.config)
+	wks = load_project(args)
 	lint_result = lint(wks)
 	terms = get_terms(wks)
 	if 'error' in lint_result:
@@ -488,9 +539,33 @@ def export(args):
 			
 
 def compare(args):
-	wks = load_project(args.config)
-	local_terms = map(lambda x: x.keys()[0], flatten(get_local_terms(args.file), []))
+	wks = load_project(args)
+	local_terms_all = get_local_terms(args.file)
+	local_terms = map(lambda x: x.keys()[0], flatten(local_terms_all, []))
 	sync_keys(wks, local_terms)
+	if args.l:
+		onlineterms = get_terms(wks)
+		langterms = onlineterms[args.l]
+		langtermsflattened = flatten(langterms, [])
+		local_terms_all_flattened = flatten(local_terms_all, [])
+		if args.merge:
+			nl = []
+			for x in local_terms_all_flattened:
+				for key, value in x.items():
+					nl.append({key: '\n'.join(value) if isinstance(value, list) else value })
+
+			local_terms_all_flattened = nl
+		#print local_terms_all_flattened
+		final = { x.items()[0][0] : x.items()[0][1] for x in  local_terms_all_flattened }
+		final_remote =  { x.items()[0][0] : x.items()[0][1] for x in  langtermsflattened }
+		for key, value in final.items():
+			if value != final_remote[key]:
+				print "Diff at " + key + "\n Offline was:\n" + value.encode('ascii', 'backslashreplace') + "\nonline was\n" + final_remote[key].encode('ascii', 'backslashreplace')
+		#for x in local_terms_all_flattened:
+		#	for key, value 
+		#print langtermsflattened
+
+	#print onlineterms
 	
 def combined_import_compare(args):
 	terms = get_csv_strings(args.file, ",")
@@ -659,13 +734,17 @@ parser_export.add_argument('--fallback', type=str)
 parser_export.add_argument('--prefix', type=str)
 parser_export.add_argument('--split', nargs='?', const=True, default=False)
 parser_export.add_argument('--split_prefix', type=str)
+parser_export.add_argument('--key', type=str)
 parser_export.set_defaults(func=export)
 parser_compare = subparsers.add_parser('compare', help='compare')
+parser_compare.add_argument('--key', type=str)
 parser_compare.add_argument('file', help='file', type=str)
+parser_compare.add_argument('-l', type=str)
+parser_compare.add_argument('--merge', nargs='?', const=True, default=False)
 parser_compare.set_defaults(func=compare)
-parser_compare = subparsers.add_parser('config', help='config')
-parser_compare.add_argument('--user', type=str)
-parser_compare.set_defaults(func=config)
+parser_config = subparsers.add_parser('config', help='config')
+parser_config.add_argument('--user', type=str)
+parser_config.set_defaults(func=config)
 parser_combined_export = subparsers.add_parser('combined-export', help='combined export')
 parser_combined_export.add_argument('files', type=str)
 parser_combined_export.set_defaults(func=combined_export)
