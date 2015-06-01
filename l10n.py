@@ -16,6 +16,7 @@ import cStringIO
 import xlsxwriter
 from pprint import pprint
 from collections import OrderedDict, Callable
+from oauth2client.client import SignedJwtAssertionCredentials
 
 class DefaultOrderedDict(OrderedDict):
     # Source: http://stackoverflow.com/a/6190500/562769
@@ -223,7 +224,8 @@ def get_json(file):
 adddict = { 'en-us' : 'en_US', 'de' : 'de_DE', 'es': 'es_ES', 'fr' : 'fr_FR', 'it' : 'it_IT'}
 
 def load_project_with_key(key, user, password):
-	gc = gspread.login(user, password)
+	#gc = gspread.login(user, password)
+	gc = gspread.authorize(SignedJwtAssertionCredentials('115207091415-n78huun42kb04d6782b3qfb50eemjkoh@developer.gserviceaccount.com', u'-----BEGIN PRIVATE KEY-----\nMIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBANxMuIKd1OHER/ln\nSQg54e+x5T/hFP/fJ49b9sAPYv5+gcTnIgmdzaSRC+L3Jm1mThIeG04GglQxn74h\nSQ71DTJIFk5oopXvFZGOg/2IWcNcSN171pBaZ3vr8GHaCYiCyRNqpezG/Ez+cnPJ\nIyCtip+OOAa3qmrtcyrQztqH9aRdAgMBAAECgYEAlhJ5mxkz3TyeH0t6F+1+eZAB\ncNu/N3NoeqOWW03gDShW9LDToiNq5JGevFXLSrlns7XoueV7QSmw/Y+lOlg7TOLZ\nGTVLh/5sdiEnr/Ji6EWZXSZU6FFfO/8vFp9vLEPIzKottyH96L7GE2EoLOHv8GxU\n+tFU/ar7DESjJiJLlqECQQD0TQlpyoV4LJ255R956Q7rUFiLCRETGFj2klfEM+zh\n0D3LycsTkYW1RQ5TcXR3gESMiAtCEzpTbRMops2YCd7VAkEA5tlx9dHqacDWzn3p\nrdaaKiUb+q6qs5Pkb9kGqLWedLolfE3Kq4Pmsv7y9CPIFAs5mpAH5o3PDwHe5A1/\nQvnDaQJATKFBe6Kf/RMZom7hUa8uE9fO/kWoynGPrkA3MX8MJcTZLWwtvASgiTyR\nAtGKs9VTKzWdOmunlvWW1eCEitVFxQJAHt/EEwlhHYWx9On4H8zMz4gpBsznfZ7w\n9ViEQHoR2DCxJL/OtEOuzg+09Jv4fV3G9Xn/5IDgyXQJmFyJwa5fyQJATrV2yfHb\nuQD9iKHXTHKDgtB3MVpuHI0oQsQhEw2qA8wmwp082ai1NtOz5LIZ66BRtaNSnaOq\nXw2SMbhfyWihiA==\n-----END PRIVATE KEY-----\n', ['https://spreadsheets.google.com/feeds']))
 	wks = gc.open_by_key(key).sheet1
 	return wks
 
@@ -307,7 +309,7 @@ def get_local_terms(file):
 	return terms
 	
 def get_property_terms(file):
-	return dict(line.strip().split('=') for line in codecs.open(file, 'r', 'utf-8') if line.strip() != "")
+	return dict(map(lambda l: l.strip(), line.strip().split(' =')) for line in codecs.open(file, 'r', 'utf-8') if line.strip() != "")
 	
 
 def importt(args):
@@ -696,8 +698,8 @@ def load_global_config():
 		config = open(CONFIG_FILE, 'r')
 		data = json.load(config)
 		# ask for password
-		password = getpass.getpass('Google Drive Password:')
-		data['password'] = password
+		#password = getpass.getpass('Google Drive Password:')
+		data['password'] = '' # password
 		return data
 	
 def config(args):
