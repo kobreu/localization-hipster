@@ -10,7 +10,7 @@
 pip install gspread
 pip install xlsxwriter
 ln -s /.../l10n.py /usr/local/bin/l10n
-invite to spreadsheet
+invite 115207091415-n78huun42kb04d6782b3qfb50eemjkoh@developer.gserviceaccount.com to spreadsheet
 
 ## Import keys
 
