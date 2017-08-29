@@ -679,7 +679,11 @@ def combined_export(args):
 		j = 1
 		key = term.keys()[0]
 		worksheet.write(i,0,key)
-		for lang in terms.keys():
+		for lang in allterms.keys():
+			#print lang
+			print lang
+			print idx
+			print key
 			worksheet.write(i,j, allterms[lang][idx][key], format)
 			j = j+1
 		worksheet.write(i,j, allnotes[key], format)
